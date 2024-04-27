@@ -1,5 +1,7 @@
 #pragma once
 
+#include <config.hpp>
+
 #include <stack_set.hpp>
 #include <stack_vec.hpp>
 #include <timer.hpp>
@@ -22,15 +24,6 @@
 #include <execinfo.h>
 #include <timer.hpp>
 #include <bit_vec.hpp>
-
-#define MPROTECT
-#ifndef MPROTECT
-#define PKEYS
-#endif
-
-#ifndef PAGE_SIZE
-#define PAGE_SIZE 4096
-#endif
 
 class PageInfo {
 public:
@@ -795,6 +788,15 @@ public:
         return "Base IntervalTest";
     }
 
+    // A virtual method that gets called whenever a huge-page is allocated
+    // WARNING: This ONLY applies to hooks using BKMalloc. For the time being,
+    //          HeapPulse only uses BKMalloc, so this is fine.
+    virtual void on_huge_page_alloc(uint8_t *huge_page, size_t size) {}
+    // A virtual method that gets called whenever a huge-page is released
+    // WARNING: This ONLY applies to hooks using BKMalloc. For the time being,
+    //          HeapPulse only uses BKMalloc, so this is fine.
+    virtual void on_huge_page_free(uint8_t *huge_page, size_t size) {}
+
     // A virtual method that gets called when an allocation is made
     virtual void on_alloc(const Allocation &alloc) {}
     // A virtual method that gets called when an allocation is freed
@@ -843,16 +845,39 @@ public:
         }
     }
 
+    void new_huge_page(uint8_t *huge_page, size_t size) {
+        for (size_t i=0; i<tests.size(); i++) {
+            if (!tests[i]->has_quit()) {
+                tests[i]->on_huge_page_alloc(huge_page, size);
+            }
+        }
+    }
+
+    void free_huge_page(uint8_t *huge_page, size_t size) {
+        for (size_t i=0; i<tests.size(); i++) {
+            if (!tests[i]->has_quit()) {
+                tests[i]->on_huge_page_free(huge_page, size);
+            }
+        }
+    }
+
+    /// @brief A function that indicates whether the interval test suite is capable of being updated by the hook
+    /// @return True if the interval test suite can be updated, false otherwise. If the interval test suite is
+    ///         actively performing an interval, it cannot be updated.
     bool can_update() const {
         return !IS_PROTECTED && !is_done() && !is_in_interval;
     }
 
+    /// @brief Add an interval test to the test suite. This interval test will be run for every interval that
+    ///        the test suite is active.
+    /// @param test The interval test to add to the test suite
     void add_test(IntervalTest *test) {
         test->setup();
         tests.push(test);
         assert(tests.size() > 0);
     }
 
+    /// @brief Go through the live set of allocations and protect all their data against both reads and writes.
     void protect_allocations() {
         #ifdef GUARD_ACCESSES
         setup_protection_handler();
@@ -875,6 +900,10 @@ public:
         #endif
     }
 
+    /// @brief Update the interval test suites's liveset of allocations with a new allocation.
+    /// @param ptr The pointer to the allocation
+    /// @param size The size of the allocation
+    /// @param return_address The return address where the allocation came from
     void update(void *ptr, size_t size, uintptr_t return_address) {
         stack_debugf("IntervalTestSuite::update\n");
         stack_debugf("Got pointer: %p\n", ptr);
@@ -1297,7 +1326,7 @@ static void protection_handler(int sig, siginfo_t *si, void *ucontext)
     }
     long page_size = sysconf(_SC_PAGESIZE);
     void* aligned_address = (void*)((uint64_t)si->si_addr & ~(page_size - 1));
-    u64 error_code = context->uc_mcontext.gregs[REG_ERR];
+    uint64_t error_code = context->uc_mcontext.gregs[REG_ERR];
     bool is_write = error_code & 0x2;
 
 
